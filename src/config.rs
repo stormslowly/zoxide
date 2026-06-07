@@ -66,6 +66,11 @@ pub fn fuzzy() -> bool {
     env::var_os("_ZO_FUZZY").is_none_or(|var| var != "0")
 }
 
+pub fn quiet() -> bool {
+    // Set _ZO_QUIET=1 to exit silently on no match instead of printing an error.
+    env::var_os("_ZO_QUIET").is_some_and(|var| var == "1")
+}
+
 pub fn fuzzy_threshold() -> Result<f64> {
     env::var_os("_ZO_FUZZY_THRESHOLD").map_or(Ok(0.85), |val| {
         let val = val.to_str().context("invalid unicode in _ZO_FUZZY_THRESHOLD")?;

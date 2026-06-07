@@ -5,7 +5,7 @@ use anyhow::{Context, Result, bail};
 use crate::cmd::{Query, Run};
 use crate::config;
 use crate::db::{Database, Epoch, Stream, StreamOptions};
-use crate::error::BrokenPipeHandler;
+use crate::error::{BrokenPipeHandler, SilentExit};
 use crate::util::{self, Fzf, FzfChild};
 
 impl Run for Query {
@@ -86,6 +86,11 @@ impl Query {
             && let Some(path) = self.first_match(db, now, true)?
         {
             return Self::print_first(path);
+        }
+        // 交互兜底（j 未命中→fzf）里，外层会接着进选目录，这句报错就很碍眼，
+        // _ZO_QUIET=1 时静默退出（仍非零），让 shell 包装层自行决定后续
+        if config::quiet() {
+            bail!(SilentExit { code: 1 });
         }
         bail!("no match found");
     }
