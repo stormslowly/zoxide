@@ -1,6 +1,6 @@
 use std::io::{self, Write};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 
 use crate::cmd::{Query, Run};
 use crate::config;
@@ -18,14 +18,14 @@ impl Run for Query {
 impl Query {
     fn query(&self, db: &mut Database) -> Result<()> {
         let now = util::current_time()?;
-        let mut stream = self.get_stream(db, now)?;
 
         if self.interactive {
+            let mut stream = self.get_stream(db, now, false)?;
             self.query_interactive(&mut stream, now)
         } else if self.list {
-            self.query_list(&mut stream, now)
+            self.query_list(db, now)
         } else {
-            self.query_first(&mut stream, now)
+            self.query_first(db, now)
         }
     }
 
@@ -52,35 +52,76 @@ impl Query {
         Ok(())
     }
 
-    fn query_list(&self, stream: &mut Stream, now: Epoch) -> Result<()> {
-        let handle = &mut io::stdout().lock();
-        while let Some(dir) = stream.next() {
-            if Some(dir.path.as_ref()) == self.exclude.as_deref() {
-                continue;
-            }
-            let dir = if self.score { dir.display().with_score(now) } else { dir.display() };
-            writeln!(handle, "{dir}").pipe_exit("stdout")?;
+    fn query_list(&self, db: &mut Database, now: Epoch) -> Result<()> {
+        if self.list_pass(db, now, false)? {
+            return Ok(());
+        }
+        if config::fuzzy() {
+            self.list_pass(db, now, true)?;
         }
         Ok(())
     }
 
-    fn query_first(&self, stream: &mut Stream, now: Epoch) -> Result<()> {
-        let handle = &mut io::stdout();
-
-        let mut dir = stream.next().context("no match found")?;
-        while Some(dir.path.as_ref()) == self.exclude.as_deref() {
-            dir = stream.next().context("you are already in the only match")?;
+    /// Print every match for one pass. Returns true if anything was printed.
+    fn list_pass(&self, db: &mut Database, now: Epoch, fuzzy: bool) -> Result<bool> {
+        let mut stream = self.get_stream(db, now, fuzzy)?;
+        let handle = &mut io::stdout().lock();
+        let mut found = false;
+        while let Some(dir) = stream.next() {
+            if Some(dir.path.as_ref()) == self.exclude.as_deref() {
+                continue;
+            }
+            found = true;
+            let dir = if self.score { dir.display().with_score(now) } else { dir.display() };
+            writeln!(handle, "{dir}").pipe_exit("stdout")?;
         }
-
-        let dir = if self.score { dir.display().with_score(now) } else { dir.display() };
-        writeln!(handle, "{dir}").pipe_exit("stdout")
+        Ok(found)
     }
 
-    fn get_stream<'a>(&self, db: &'a mut Database, now: Epoch) -> Result<Stream<'a>> {
+    fn query_first(&self, db: &mut Database, now: Epoch) -> Result<()> {
+        if let Some(path) = self.first_match(db, now, false)? {
+            return Self::print_first(path);
+        }
+        if config::fuzzy()
+            && let Some(path) = self.first_match(db, now, true)?
+        {
+            return Self::print_first(path);
+        }
+        bail!("no match found");
+    }
+
+    /// Return the first non-excluded match for one pass as an owned string,
+    /// dropping the stream (and its `&mut db` borrow) before returning so a
+    /// second pass can run.
+    fn first_match(&self, db: &mut Database, now: Epoch, fuzzy: bool) -> Result<Option<String>> {
+        let mut stream = self.get_stream(db, now, fuzzy)?;
+        while let Some(dir) = stream.next() {
+            if Some(dir.path.as_ref()) == self.exclude.as_deref() {
+                continue;
+            }
+            let out = if self.score {
+                dir.display().with_score(now).to_string()
+            } else {
+                dir.display().to_string()
+            };
+            return Ok(Some(out));
+        }
+        Ok(None)
+    }
+
+    fn print_first(path: String) -> Result<()> {
+        let handle = &mut io::stdout();
+        writeln!(handle, "{path}").pipe_exit("stdout")
+    }
+
+    fn get_stream<'a>(&self, db: &'a mut Database, now: Epoch, fuzzy: bool) -> Result<Stream<'a>> {
         let mut options = StreamOptions::new(now)
             .with_keywords(self.keywords.iter().map(|s| s.as_str()))
             .with_exclude(config::exclude_dirs()?)
             .with_base_dir(self.base_dir.clone());
+        if fuzzy {
+            options = options.with_fuzzy(true, config::fuzzy_threshold()?);
+        }
         if !self.all {
             let resolve_symlinks = config::resolve_symlinks();
             options = options.with_exists(true).with_resolve_symlinks(resolve_symlinks);
