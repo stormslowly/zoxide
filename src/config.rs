@@ -60,3 +60,18 @@ pub fn maxage() -> Result<Rank> {
 pub fn resolve_symlinks() -> bool {
     env::var_os("_ZO_RESOLVE_SYMLINKS").is_some_and(|var| var == "1")
 }
+
+pub fn fuzzy() -> bool {
+    // Enabled by default; set _ZO_FUZZY=0 to disable the fuzzy fallback.
+    env::var_os("_ZO_FUZZY").is_none_or(|var| var != "0")
+}
+
+pub fn fuzzy_threshold() -> Result<f64> {
+    env::var_os("_ZO_FUZZY_THRESHOLD").map_or(Ok(0.85), |val| {
+        let val = val.to_str().context("invalid unicode in _ZO_FUZZY_THRESHOLD")?;
+        let val = val
+            .parse::<f64>()
+            .with_context(|| format!("unable to parse _ZO_FUZZY_THRESHOLD as float: {val}"))?;
+        Ok(val)
+    })
+}
