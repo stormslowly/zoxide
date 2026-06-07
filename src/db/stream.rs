@@ -83,18 +83,30 @@ impl<'a> Stream<'a> {
             None => return true,
         };
 
-        let path = util::to_lowercase(path);
-        let mut path = path.as_str();
-        match path.rfind(keywords_last) {
-            Some(idx) => {
-                if path[idx + keywords_last.len()..].contains(path::is_separator) {
-                    return false;
-                }
-                path = &path[..idx];
+        let lowered = util::to_lowercase(path);
+        let mut path = lowered.as_str();
+
+        if self.options.fuzzy {
+            // Fuzzy mode: match the last keyword against the basename via Jaro-Winkler.
+            let basename_start = path.rfind(path::is_separator).map(|i| i + 1).unwrap_or(0);
+            let basename = &path[basename_start..];
+            if strsim::jaro_winkler(keywords_last, basename) < self.options.fuzzy_threshold {
+                return false;
             }
-            None => return false,
+            path = &path[..basename_start];
+        } else {
+            match path.rfind(keywords_last) {
+                Some(idx) => {
+                    if path[idx + keywords_last.len()..].contains(path::is_separator) {
+                        return false;
+                    }
+                    path = &path[..idx];
+                }
+                None => return false,
+            }
         }
 
+        // Earlier keywords still use the exact, ordered-substring rule.
         for keyword in keywords.iter().rev() {
             match path.rfind(keyword) {
                 Some(idx) => path = &path[..idx],
@@ -129,6 +141,13 @@ pub struct StreamOptions {
     /// Only return directories within this parent directory
     /// Does not check if the path exists
     base_dir: Option<String>,
+
+    /// Enable typo-tolerant matching: compare the last keyword against the
+    /// basename using Jaro-Winkler similarity.
+    fuzzy: bool,
+
+    /// Jaro-Winkler similarity threshold for fuzzy matching.
+    fuzzy_threshold: f64,
 }
 
 impl StreamOptions {
@@ -141,6 +160,8 @@ impl StreamOptions {
             resolve_symlinks: false,
             ttl: now.saturating_sub(3 * MONTH),
             base_dir: None,
+            fuzzy: false,
+            fuzzy_threshold: 0.0,
         }
     }
 
@@ -170,6 +191,12 @@ impl StreamOptions {
 
     pub fn with_base_dir(mut self, base_dir: Option<String>) -> Self {
         self.base_dir = base_dir;
+        self
+    }
+
+    pub fn with_fuzzy(mut self, fuzzy: bool, threshold: f64) -> Self {
+        self.fuzzy = fuzzy;
+        self.fuzzy_threshold = threshold;
         self
     }
 }
@@ -205,6 +232,25 @@ mod tests {
     fn query(#[case] keywords: &[&str], #[case] path: &str, #[case] is_match: bool) {
         let db = &mut Database::new(PathBuf::new(), Vec::new(), |_| Vec::new(), false);
         let options = StreamOptions::new(0).with_keywords(keywords.iter());
+        let stream = Stream::new(db, options);
+        assert_eq!(is_match, stream.filter_by_keywords(path));
+    }
+
+    #[rstest]
+    // typo still matches
+    #[case(&["dotfiels"], "/home/user/dotfiles", true)]
+    // correct spelling matches too (JW = 1.0)
+    #[case(&["dotfiles"], "/home/user/dotfiles", true)]
+    // nothing alike, no match
+    #[case(&["xyzzy"], "/home/user/dotfiles", false)]
+    // exact earlier keyword + fuzzy last keyword
+    #[case(&["cfg", "dotfiels"], "/home/user/cfg/dotfiles", true)]
+    // earlier keyword fails exact match -> whole path rejected
+    #[case(&["nope", "dotfiels"], "/home/user/cfg/dotfiles", false)]
+    fn query_fuzzy(#[case] keywords: &[&str], #[case] path: &str, #[case] is_match: bool) {
+        let db = &mut Database::new(PathBuf::new(), Vec::new(), |_| Vec::new(), false);
+        let options =
+            StreamOptions::new(0).with_keywords(keywords.iter()).with_fuzzy(true, 0.85);
         let stream = Stream::new(db, options);
         assert_eq!(is_match, stream.filter_by_keywords(path));
     }
